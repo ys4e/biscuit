@@ -1,0 +1,32 @@
+[package]
+name = "biscuit"
+version = "0.1.0"
+authors = ["KingRainbow44"]
+description = "Google Protobuf schema pattern matcher"
+license = "MIT"
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
+
+# Arbitrary protocol buffer data parser
+protoshark = { path = "../protoshark" }
+
+# JavaScipt interpreter
+boa_engine = "0.20"
+boa_gc = "0.20"
+
+# Logger
+log = "0.4"
+
+# `anyhow` error resolver
+anyhow = "1"
+
+# Serde serialization
+serde = { version = "1", features = ["derive"] }
+
+# Runtime-initialized static constants
+lazy_static = "1"
+
+# Platform-agnostic crate to validate thread
+is_main_thread = "0.1.0"
