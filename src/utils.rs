@@ -37,11 +37,11 @@ macro_rules! js_get {
 /// use biscuit::js_convert;
 /// 
 /// let value = JsValue::from(42);
-/// let number = js_convert!(value, context, as_number);
+/// let number = js_convert!(value, as_number);
 /// ```
 #[macro_export]
 macro_rules! js_convert {
-    ($variable:expr, $context:expr, $type:ident) => {
+    ($variable:expr, $type:ident) => {
         {
             let Some(value) = $variable.$type() else {
                 return js_error!(concat!("failed to convert {} to {}", stringify!($variable), stringify!($type)));

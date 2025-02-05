@@ -4,13 +4,32 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use boa_engine::{js_string, Context, Finalize, JsData, JsNativeError, JsString, JsValue, NativeFunction, Source, Trace};
 use boa_engine::realm::Realm;
-use boa_engine::value::TryIntoJs;
+use boa_engine::value::{TryFromJs, TryIntoJs};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use protoshark::{SerializedMessage as ProtoMessage};
 use crate::config::Config;
 use crate::message::SerializedMessage;
 use crate::{js_catch, js_get, from_realm, js_error, js_convert};
+
+/// Represents a JavaScript object containing field data.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, Trace, Finalize, TryFromJs)]
+pub struct MessageField {
+    /// The name of the field.
+    /// 
+    /// # Repeated Names
+    /// 
+    /// If this field name is repeated, the other fields will be categorized under a `oneof`.
+    pub field_name: String,
+    
+    /// The type of the field.
+    pub field_type: String,
+    
+    /// The ID of the field.
+    /// 
+    /// This must be unique.
+    pub field_id: u16
+}
 
 /// Represents the deobfuscated packet cache.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, Trace, Finalize, JsData)]
@@ -27,10 +46,43 @@ pub struct Cache {
 
     /// This maps packet IDs to their guessed name.
     id_map: HashMap<u16, String>,
-
-    string: String
+    
+    /// All cached messages.
+    messages: HashMap<String, Vec<MessageField>>
 }
 
+impl Cache {
+    /// Simple check to see if the cache knows the given ID.
+    pub fn id_known(&self, id: u16) -> bool {
+        self.id_map.contains_key(&id)
+    }
+    
+    /// Simple check to see if the cache knows the given name.
+    pub fn name_known(&self, name: &str) -> bool {
+        self.known_names.contains(&name.to_string())
+    }
+    
+    /// Updates the cache with the guessed name, ID, and field data.
+    pub fn update(
+        &mut self,
+        message_name: String,
+        packet_id: u16,
+        field: MessageField
+    ) {
+        // Add the message to the cache if it doesn't exist.
+        if !self.id_map.contains_key(&packet_id) {
+            self.known_names.push(message_name.clone());
+            self.known_ids.push(packet_id);
+            self.id_map.insert(packet_id, message_name.clone());
+        }
+        
+        // Add the field to the message.
+        let fields = self.messages.entry(message_name).or_default();
+        fields.push(field);
+    }
+}
+
+/// Represents a JavaScript object containing packet data.
 #[derive(Trace, Finalize, JsData)]
 struct JsCache(#[unsafe_ignore_trace] GlobalCache);
 
@@ -136,10 +188,10 @@ impl Comparer {
         realm
             .host_defined_mut()
             .insert(JsCache(cache.clone()));
-        
+
         // Update the runtime.
         declare_runtime(realm, &mut context)?;
-        
+
         // Load the script into the context.
         if let Err(error) = context.eval(script) {
             return Err(anyhow!("failed to evaluate script: {:#?}", error));
@@ -194,11 +246,10 @@ fn declare_runtime(_: Realm, context: &mut Context) -> Result<()> {
             let Some(message) = args.get(0) else {
                 return js_error!("missing message argument");
             };
-            
-            let message = js_convert!(message, context, as_string)
-                .to_std_string_escaped();
+
+            let message = js_convert!(message, as_string).to_std_string_escaped();
             info!("{}", message);
-            
+
             Ok(JsValue::Undefined)
         })
     ));
@@ -209,31 +260,77 @@ fn declare_runtime(_: Realm, context: &mut Context) -> Result<()> {
             let Some(message) = args.get(0) else {
                 return js_error!("missing message argument");
             };
-            
-            let message = js_convert!(message, context, as_string)
-                .to_std_string_escaped();
+
+            let message = js_convert!(message, as_string).to_std_string_escaped();
             warn!("{}", message);
-            
+
             Ok(JsValue::Undefined)
         })
     ));
-    
+
     js_catch!(context.register_global_builtin_callable(
-        JsString::from("writeString"), 0,
-        NativeFunction::from_fn_ptr(|_, _, context| {
-            let realm = context.realm().host_defined_mut();
+        JsString::from("identify"), 3,
+        NativeFunction::from_fn_ptr(|_, args, context| {
+            let realm = context.realm().clone();
+            let realm = realm.host_defined_mut();
+            
+            // Fetch the cache from the realm.
             let Ok(mut cache) = from_realm!(realm => JsCache).0.lock() else {
                 return Err(JsNativeError::typ()
                     .with_message("failed to get cache")
                     .into());
             };
+
+            // Get the data from the arguments.
+            let Some(packet_name) = args.get(0) else {
+                return js_error!("missing packet name argument");
+            };
+            let Some(packet_id) = args.get(1) else {
+                return js_error!("missing packet ID argument");
+            };
+            let Some(field) = args.get(2) else {
+                return js_error!("missing field argument");
+            };
             
-            cache.string = "Hello, World!".to_string();
-            drop(cache); // Release the lock.
+            // Convert the data into Rust-owned values.
+            let packet_name = js_convert!(packet_name, as_string).to_std_string_escaped();
+            let packet_id = js_convert!(packet_id, as_number) as u16;
+            let packet_field = MessageField::try_from_js(field, context)?;
+            
+            // Update the cache.
+            cache.update(packet_name, packet_id, packet_field);
 
             Ok(JsValue::Undefined)
         })
     ));
     
+    js_catch!(context.register_global_builtin_callable(
+        JsString::from("isKnown"), 1,
+        NativeFunction::from_fn_ptr(|_, args, context| {
+            // Fetch the cache from the realm.
+            let realm = context.realm().host_defined_mut();
+            let Ok(cache) = from_realm!(realm => JsCache).0.lock() else {
+                return Err(JsNativeError::typ()
+                    .with_message("failed to get cache")
+                    .into());
+            };
+            
+            // Get the data from the arguments.
+            let Some(packet_id) = args.get(0) else {
+                return js_error!("missing packet ID argument");
+            };
+
+            if packet_id.is_string() {
+                let packet_name = js_convert!(packet_id, as_string).to_std_string_escaped();
+                Ok(JsValue::Boolean(cache.name_known(&packet_name)))
+            } else if packet_id.is_number() {
+                let packet_id = js_convert!(packet_id, as_number) as u16;
+                Ok(JsValue::Boolean(cache.id_known(packet_id)))
+            } else {
+                js_error!("invalid packet ID type")
+            }
+        })
+    ));
+
     Ok(())
 }
