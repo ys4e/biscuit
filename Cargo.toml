@@ -13,6 +13,7 @@ edition = "2021"
 protoshark = { path = "../protoshark" }
 
 # JavaScipt interpreter
+boa_runtime = "0.20"
 boa_engine = "0.20"
 boa_gc = "0.20"
 
@@ -30,3 +31,10 @@ lazy_static = "1"
 
 # Platform-agnostic crate to validate thread
 is_main_thread = "0.1.0"
+
+# Macro tools
+paste = "1"
+
+# Utilities for JavaScript functions
+rsa = "0.9"
+base64 = "0.22"

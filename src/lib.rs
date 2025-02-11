@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use anyhow::{Result, anyhow};
 use is_main_thread::is_main_thread;
 use crate::config::Config;
-use crate::matcher::Matcher;
+use crate::matcher::{Cache, Matcher};
 
 pub mod config;
 mod matcher;
@@ -50,7 +50,7 @@ pub fn initialize(config: Config) -> Result<()> {
 /// # Notice
 /// 
 /// This should **only** be called on the main thread.
-pub fn input(data: &[u8]) -> Result<()> {
+pub fn input(id: u16, header: &[u8], data: &[u8]) -> Result<()> {
     // Check if we are on the main thread.
     let is_main = is_main_thread().unwrap_or_else(|| true);
     if !is_main {
@@ -61,7 +61,17 @@ pub fn input(data: &[u8]) -> Result<()> {
     let mut matcher = MATCHER.lock().unwrap();
     
     // Compare the data.
-    matcher.compare(data)?;
+    matcher.compare(id, header, data)?;
     
     Ok(())
+}
+
+/// Fetches the cache.
+/// 
+/// This returns a clone.
+pub fn cache() -> Cache {
+    let matcher = MATCHER.lock().unwrap();
+    let cache = matcher.cache.lock().unwrap();
+    
+    cache.clone()
 }
