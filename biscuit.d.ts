@@ -1,5 +1,22 @@
 declare global {
     /**
+     * The global environment variables, provided by the user.
+     */
+    export const env: Map<string, string>;
+
+    /**
+     * The global module object.
+     */
+    export const module: { exports: any[] };
+
+    /**
+     * Imports a module.
+     *
+     * @param module The path to the module, relative to the current script.
+     */
+    export function require(module: string): undefined | any;
+
+    /**
      * Logs an info message to the console.
      *
      * @param message The message to log.
@@ -16,7 +33,7 @@ declare global {
     /**
      * Decodes a Base64-encoded string.
      * This is the standard Base64 encoding.
-     * 
+     *
      * @param encoded The Base64-encoded string.
      */
     export function base64Decode(encoded: string): ArrayBuffer;
@@ -28,7 +45,7 @@ declare global {
      * @param encryptedData The encrypted data in Base64 format.
      */
     export function rsaDecrypt(privateKey: string, encryptedData: string): ArrayBuffer;
-    
+
     /**
      * Identifies a packet.
      *
@@ -48,26 +65,6 @@ declare global {
      * @param packetId The ID of the packet. This can be the numerical ID or the packet name.
      */
     export function isKnown(packetId: string | number): boolean;
-
-    /** Represents `matcher.rs#Cache` */
-    export interface Cache {
-        /**
-         * This is an array of known packet names.
-         * This is not definitive, and is used only for quick reference.
-         */
-        known_names: string[];
-
-        /**
-         * This is an array of known packet IDs.
-         * This is not definitive, and is used only for quick reference.
-         */
-        known_ids: number[];
-
-        /**
-         * This maps packet IDs to their guessed name.
-         */
-        id_map: Map<number, string>;
-    }
 
     /** Represents `matcher.rs#MessageField` */
     export interface FieldData {

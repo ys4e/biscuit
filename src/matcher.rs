@@ -1,8 +1,11 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
-use boa_engine::{js_string, Context, Finalize, JsData, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, Trace};
+use boa_engine::{js_string, Context, Finalize, JsArgs, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Source, Trace};
+use boa_engine::module::SimpleModuleLoader;
+use boa_engine::object::builtins::JsMap;
 use boa_engine::property::Attribute;
 use boa_engine::realm::Realm;
 use boa_engine::value::{TryFromJs, TryIntoJs};
@@ -34,7 +37,7 @@ pub struct MessageField {
 }
 
 /// Represents the deobfuscated packet cache.
-#[derive(Deserialize, Serialize, Clone, Debug, Default, Trace, Finalize, JsData)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct Cache {
     /// This is an array of known packet names.
     ///
@@ -48,6 +51,9 @@ pub struct Cache {
 
     /// This maps packet IDs to their guessed name.
     id_map: HashMap<u16, String>,
+    
+    /// This maps guessed names to their packet IDs.
+    name_map: HashMap<String, u16>,
     
     /// All cached messages.
     messages: HashMap<String, Vec<MessageField>>
@@ -75,7 +81,9 @@ impl Cache {
         if !self.id_map.contains_key(&packet_id) {
             self.known_names.push(message_name.clone());
             self.known_ids.push(packet_id);
+            
             self.id_map.insert(packet_id, message_name.clone());
+            self.name_map.insert(message_name.clone(), packet_id);
         }
         
         // Add the field to the message.
@@ -90,6 +98,9 @@ struct JsCache(#[unsafe_ignore_trace] GlobalCache);
 
 /// This type is an alias for a cache shared between comparers.
 type GlobalCache = Arc<Mutex<Cache>>;
+
+/// This type is an alias for the environment variables map.
+type Env = BTreeMap<String, String>;
 
 /// A matcher is a struct containing a group of comparers.
 ///
@@ -115,7 +126,16 @@ impl Matcher {
     }
 
     /// Loads all scripts from the specified path.
-    pub fn load_scripts(&mut self, path: &Path) -> Result<()> {
+    pub fn initialize(&mut self, path: &Path, env_vars: Option<Env>) -> Result<()> {
+        // Check if environment variables exist.
+        let env_vars = match env_vars {
+            Some(value) => value,
+            None => Env::new()
+        };
+
+        // Create the module loader.
+        let loader = Rc::new(js_catch!(SimpleModuleLoader::new(&path)));
+
         // Enumerate the directory for JavaScript files.
         for entry in path.read_dir()? {
             // Check if the entry is an error.
@@ -129,24 +149,28 @@ impl Matcher {
 
             // Create a script instance.
             let entry = entry.path();
-            if let Some(extension) = entry.extension() {
-                if extension != "js" {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-
-            let comparer = match Comparer::from(&entry, self.cache.clone()) {
-                Ok(script) => script,
-                Err(error) => {
-                    warn!("Invalid script (maybe syntax error?): {:#?}", error);
-                    continue;
-                }
+            match entry.extension() {
+                Some(extension) => {
+                    if extension != "js" {
+                        continue;
+                    }
+                },
+                None => continue
             };
 
-            // Add the script to the list.
-            self.comparers.push(comparer);
+            match Comparer::from(
+                &loader, &entry, self.cache.clone(), &env_vars
+            ) {
+                Ok(Some(script)) => self.comparers.push(script),
+                Err(error) => {
+                    warn!(
+                        "Invalid script while parsing '{}' (maybe syntax error?): {}",
+                        entry.to_string_lossy(),
+                        error
+                    );
+                },
+                _ => continue
+            };
         }
 
         Ok(())
@@ -173,6 +197,17 @@ impl Matcher {
 
         // Send the data to each comparer.
         for comparer in &mut self.comparers {
+            // Check the cache to see if the packet is known.
+            let cache = self.cache.lock().unwrap();
+            if let Some(known_id) = cache.name_map.get(&comparer.name) {
+                if known_id != &id {
+                    continue;
+                }
+            }
+            
+            // Unlock the cache.
+            drop(cache);
+            
             if let Err(error) = comparer.compare(id, &header, &data) {
                 warn!("Failed to compare packet: {:#?}", error);
             }
@@ -184,7 +219,8 @@ impl Matcher {
 
 #[derive(Debug)]
 pub struct Comparer {
-    context: Context
+    context: Context,
+    pub name: String
 }
 
 /// This unsafe implementation is used to allow any comparers to be sent between threads.
@@ -193,41 +229,81 @@ pub struct Comparer {
 unsafe impl Send for Comparer {}
 
 impl Comparer {
+    /// The name of the environment variables global property.
+    const ENV_VARS_NAME: JsString = js_string!("env");
+
     /// Creates a script instance from the contents of script.
-    pub fn from(script: &Path, cache: GlobalCache) -> Result<Self> {
+    pub fn from(
+        loader: &Rc<SimpleModuleLoader>,
+        script: &Path,
+        cache: GlobalCache,
+        env_vars: &Env
+    ) -> Result<Option<Self>> {
         // Parse the script.
-        let script = Source::from_filepath(script)?;
+        let source = Source::from_filepath(script)?;
 
         // Create a script context.
-        let mut context = Context::default();
+        let mut context = js_catch!(Context::builder()
+            .module_loader(loader.clone())
+            .build());
 
         // Add the cache to the realm.
         let realm = context.realm().clone();
         realm
             .host_defined_mut()
             .insert(JsCache(cache.clone()));
+        
+        // Add the script's directory to the realm.
+        if let Some(directory) = script.parent() {
+            realm
+                .host_defined_mut()
+                .insert(directory.to_string_lossy().to_string());
+        };
+
+        // Add the environment variables to the context.
+        let map = JsMap::new(&mut context);
+        for (key, value) in env_vars {
+            let key = js_string!(key.clone());
+            let value = js_string!(value.clone());
+            js_catch!(map.set(key, value, &mut context));
+        }
 
         // Update the runtime.
+        context
+            .register_global_property(Self::ENV_VARS_NAME, map, Attribute::all())
+            .expect("global property 'console' already exists");
+
         declare_runtime(realm, &mut context)?;
 
         // Load the script into the context.
-        if let Err(error) = context.eval(script) {
+        if let Err(error) = context.eval(source) {
             return Err(anyhow!("failed to evaluate script: {:#?}", error));
         };
+
+        // If the function does not contain a 'compare' function, return `None`.
+        if js_get!(context, "compare"; as_callable).is_err() {
+            return Ok(None);
+        }
+        
+        // Get the script's packet name.
+        let Ok(name) = js_get!(context, "PACKET_NAME"; as_string) else {
+            return Err(anyhow!("failed to get packet name"));
+        };
+        let name = name.to_std_string_escaped();
 
         // Run the initialize function if it exists.
         if let Ok(initialize) = js_get!(context, "init"; as_callable) {
             js_catch!(initialize.call(&JsValue::undefined(), &[], &mut context));
         }
 
-        Ok(Comparer { context })
+        Ok(Some(Comparer { context, name }))
     }
 
     /// Provides the given data to the comparer.
     ///
     /// This will run the comparer's logic and return the result.
     pub fn compare(&mut self, id: u16, header: &ProtoMessage, data: &ProtoMessage) -> Result<()> {
-        // Convert the `protoshark` message into a JavaScript object.
+        // Convert parameters into JavaScript objects.
         let id = js_catch!(id.try_into_js(&mut self.context));
         let header = SerializedMessage::from_to_js(&mut self.context, header)?;
         let data = SerializedMessage::from_to_js(&mut self.context, data)?;
@@ -255,13 +331,27 @@ impl Comparer {
 /// Adds functions to the JavaScript context.
 fn declare_runtime(_: Realm, context: &mut Context) -> Result<()> {
     let console = Console::init(context);
+    let module = {
+        let obj = JsObject::default();
+        js_catch!(obj.set(js_string!("exports"), js_string!(""), false, context));
+
+        obj
+    };
 
     context
         .register_global_property(Console::NAME, console, Attribute::all())
-        .expect("global property 'console' already exists");
+        .expect("global property 'console' should not exist");
+    context
+        .register_global_property(js_string!("module"), JsValue::from(module), Attribute::default())
+        .expect("global property 'module' should not exist");
     context
         .register_global_class::<SerializedMessage>()
-        .expect("class SerializedMessage already exists");
+        .expect("class SerializedMessage should not exist");
+
+    js_catch!(context.register_global_builtin_callable(
+        js_string!("require"), 0,
+        NativeFunction::from_fn_ptr(js_require)
+    ));
 
     js_catch!(context.register_global_builtin_callable(
         JsString::from("info"), 1,
@@ -299,6 +389,38 @@ fn declare_runtime(_: Realm, context: &mut Context) -> Result<()> {
     ));
 
     Ok(())
+}
+
+/// JavaScript-compatible function that includes a file in the context.
+fn js_require(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // Fetch the file path from the arguments.
+    let file = args.get_or_undefined(0);
+    let file = file.to_string(context)?.to_std_string_escaped();
+    
+    // Get the parent path from the realm.
+    let realm = context.realm().clone();
+    let realm = realm.host_defined_mut();
+    
+    let Some(parent) = realm.get::<String>() else {
+        return js_error!("failed to get parent path");
+    };
+    let parent = PathBuf::from(parent);
+
+    // Load the file from the file system.
+    let import_file = parent.join(file);
+    let Ok(source) = Source::from_filepath(&import_file) else {
+        return js_error!("failed to load file");
+    };
+    context.eval(source)?;
+
+    // Get the module's exports.
+    let global = context.global_object();
+    let module = global.get(js_string!("module"), context)?;
+
+    match module.as_object() {
+        Some(module) => module.get(js_string!("exports"), context),
+        None => js_error!("failed to get module object")
+    }
 }
 
 /// JavaScript-compatible function that identifies a packet and its fields.

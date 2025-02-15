@@ -38,3 +38,4 @@ paste = "1"
 # Utilities for JavaScript functions
 rsa = "0.9"
 base64 = "0.22"
+dotenv-parser = "0.1"

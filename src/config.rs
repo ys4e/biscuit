@@ -13,13 +13,25 @@ pub struct Config {
     /// # Default
     ///
     /// `scripts`
-    pub script_path: String
+    pub script_path: String,
+    
+    /// The path to a file containing environment variables.
+    /// 
+    /// These are the only variables that will be accessible to scripts.
+    /// 
+    /// If left blank, no environment variables will be loaded.
+    /// 
+    /// # Default
+    /// 
+    /// `.env`
+    pub environment_file: String
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            script_path: "scripts".to_string()
+            script_path: "scripts".to_string(),
+            environment_file: ".env".to_string()
         }
     }
 }

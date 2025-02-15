@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use lazy_static::lazy_static;
 use anyhow::{Result, anyhow};
+use dotenv_parser::parse_dotenv;
 use is_main_thread::is_main_thread;
 use crate::config::Config;
 use crate::matcher::{Cache, Matcher};
@@ -38,9 +39,28 @@ pub fn initialize(config: Config) -> Result<()> {
         return Err(anyhow!("script folder does not exist"));
     }
 
+    // Try loading the environment file.
+    let env_file = &config.environment_file;
+    let variables = {
+        let file = Path::new(env_file);
+        
+        if file.exists() {
+            let content = std::fs::read_to_string(file)?;
+            match parse_dotenv(&content) {
+                Ok(map) => Some(map),
+                Err(error) => {
+                    log::warn!("failed to parse environment file: {}", error);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     // Initialize the matcher.
     matcher.config = Arc::new(config);
-    matcher.load_scripts(path)?;
+    matcher.initialize(path, variables)?;
 
     Ok(())
 }
@@ -67,11 +87,11 @@ pub fn input(id: u16, header: &[u8], data: &[u8]) -> Result<()> {
 }
 
 /// Fetches the cache.
-/// 
+///
 /// This returns a clone.
 pub fn cache() -> Cache {
     let matcher = MATCHER.lock().unwrap();
     let cache = matcher.cache.lock().unwrap();
-    
+
     cache.clone()
 }
